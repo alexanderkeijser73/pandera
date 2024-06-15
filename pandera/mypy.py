@@ -2,14 +2,15 @@
 
 from typing import Callable, Optional, Union, cast
 
+from mypy.errorcodes import ATTR_DEFINED
 from mypy.nodes import FuncBase, SymbolNode, TypeInfo
 from mypy.plugin import (
     ClassDefContext,
     FunctionSigContext,
     MethodSigContext,
-    Plugin,
+    Plugin, AttributeContext, MethodContext,
 )
-from mypy.types import CallableType, Instance, UnionType
+from mypy.types import CallableType, Instance, UnionType, Type
 
 DATAFRAMEMODEL_FULLNAME = "pandera.api.pandas.model.DataFrameModel"
 PANDERA_PANDAS_DATAFRAME_FULLNAME = "pandera.typing.pandas.DataFrame"
@@ -23,6 +24,7 @@ PANDERA_PYSPARK_SERIES_FULLNAME = "pandera.typing.pyspark.Series"
 PANDERA_PYSPARK_INDEX_FULLNAME = "pandera.typing.pyspark.Index"
 PANDERA_GEOPANDAS_SERIES_FULLNAME = "pandera.typing.geopandas.GeoSeries"
 PANDAS_CONCAT = "pandas.core.reshape.concat.concat"
+PANDAS_DATAFRAME_FULLNAME = 'pandas.core.frame.DataFrame'
 
 FIELD_GENERICS_FULLNAMES = {
     PANDERA_PANDAS_SERIES_FULLNAME,
@@ -82,6 +84,14 @@ class PanderaPlugin(Plugin):
                 return self._pandera_model_class_maker_callback
         return None
 
+    def get_attribute_hook(self, fullname: str) -> "Optional[Callable[[AttributeContext], Type]]":
+        if PANDAS_DATAFRAME_FULLNAME in fullname:
+            return pandera_attribute_callback
+
+    def get_method_hook(self, fullname: str) -> "Optional[Callable[[MethodContext], Type]]":
+        if PANDERA_PANDAS_DATAFRAME_FULLNAME in fullname:
+            return pandera_method_callback
+
     def _pandera_model_class_maker_callback(
         self, ctx: ClassDefContext
     ) -> None:
@@ -111,6 +121,30 @@ class PanderaPlugin(Plugin):
             *ctx.default_signature.arg_types[1:],
         ]
         return ctx.default_signature.copy_modified(arg_types=arg_types)
+
+
+def _check_column_defined(ctx: Union[AttributeContext, MethodContext], colname: str):
+    schema = ctx.type.args[0]
+    schema_cols = {k for s in schema.type.mro for k in s.defn.info.names.keys()}
+    if colname not in schema_cols:
+        full_message = f"Column '{colname}' not defined for Pandera DataFrameModel '{schema}'"
+        ctx.api.fail(full_message, ctx.context, code=ATTR_DEFINED)
+
+
+def pandera_method_callback(ctx: MethodContext) -> Type:
+    if hasattr(ctx.type, "type") and ctx.type.type.fullname == PANDERA_PANDAS_DATAFRAME_FULLNAME:
+        colname = ctx.args[0][0]
+        if hasattr(colname, 'value'):
+            colname = colname.value
+            _check_column_defined(ctx, colname)
+    return ctx.default_return_type
+
+
+def pandera_attribute_callback(ctx: AttributeContext) -> Type:
+    if hasattr(ctx.type, "type") and ctx.type.type.fullname == PANDERA_PANDAS_DATAFRAME_FULLNAME:
+        colname = ctx.context.name
+        _check_column_defined(ctx, colname)
+    return ctx.default_attr_type
 
 
 class DataFrameModelTransformer:
